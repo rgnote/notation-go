@@ -42,6 +42,32 @@ func isPresent(val string, values []string) bool {
 	return false
 }
 
+func validateDistinguishedName(name string) error {
+
+}
+
+func validateTrustedIdentity(identity string, statement TrustPolicy) error {
+	if identity == "" {
+		return fmt.Errorf("trust policy statement %q has an empty trusted identity", statement.Name)
+	}
+
+	if identity != "*" {
+		i := strings.Index(identity, ":")
+		if i < 0 {
+			return fmt.Errorf("trust policy statement %q has trusted identity %q without an identity prefix", statement.Name, statement.TrustStore[:i], statement.TrustStore)
+		}
+
+		identityType = identity[:i]
+
+		if identityType == "x509.subject" {
+			return validateDistinguishedName(identity[i:])
+		}
+
+	}
+	// No error
+	return nil
+}
+
 // ValidatePolicyDocument validates a policy document according to it's version's rule set.
 // if any rule is violated, returns an error
 func ValidatePolicyDocument(policyDoc *PolicyDocument) error {
@@ -101,8 +127,8 @@ func ValidatePolicyDocument(policyDoc *PolicyDocument) error {
 
 		// If there are trusted identities, verify they are not empty
 		for _, identity := range statement.TrustedIdentities {
-			if identity == "" {
-				return fmt.Errorf("trust policy statement %q has an empty trusted identity", statement.Name)
+			if err := validateTrustedIdentity(identity, statement); err != nil {
+				return err
 			}
 		}
 		// If there is a wildcard in trusted identies, there shouldn't be any other identities
