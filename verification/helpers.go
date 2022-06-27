@@ -32,6 +32,19 @@ func getArtifactPathFromUri(artifactUri string) (string, error) {
 	return artifactPath, nil
 }
 
+func getArtifactDigestFromUri(artifactUri string) (string, error) {
+	i := strings.LastIndex(artifactUri, ":")
+	if i < 0 {
+		return "", fmt.Errorf("artifact URI %q could not be parsed, make sure it is the fully qualified OCI artifact URI without the scheme/protocol. e.g domain.com:80/my/repository:digest", artifactUri)
+	}
+
+	artifactDigest := artifactUri[i+1:]
+	if artifactDigest == "" {
+		return "", fmt.Errorf("artifact URI %q has an invalid digest %q, make sure the URI is the fully qualified OCI artifact URI without the scheme/protocol. e.g domain.com:80/my/repository:digest", artifactUri, artifactDigest)
+	}
+	return artifactDigest, nil
+}
+
 // validateRegistryScopeFormat validates if a scope is following the format defined in distribution spec
 func validateRegistryScopeFormat(scope string) error {
 	// Domain and Repository regexes are adapted from distribution implementation

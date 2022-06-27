@@ -8,6 +8,15 @@ type VerificationType string
 // VerificationAction is an enum for signature verification actions such as Enforced, Logged, Skipped.
 type VerificationAction string
 
+// VerificationResult encapsulates the verification outcome for each verification type
+type VerificationResult struct {
+	FailedToVerify bool
+	Passed         bool
+	Type           VerificationType
+	Action         VerificationAction
+	Error          error
+}
+
 // VerificationLevel encapsulates the signature verification preset and it's actions for each verification type
 type VerificationLevel struct {
 	Name            string
