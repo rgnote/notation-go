@@ -1,12 +1,48 @@
 package verification
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	ldapv3 "github.com/go-ldap/ldap/v3"
 )
+
+func loadPolicyDocument() (*PolicyDocument, error) {
+	policyDocumentPath := "" // TODO get the policy path from Dir Structure functionality
+
+	var policyDocument *PolicyDocument
+	jsonFile, err := os.Open(policyDocumentPath)
+	if err != nil {
+		return nil, err
+	}
+	defer jsonFile.Close()
+	err = json.NewDecoder(jsonFile).Decode(policyDocument)
+	if err != nil {
+		return nil, err
+	}
+	return policyDocument, nil
+}
+
+func loadX509TrustStores(policyDocument *PolicyDocument) (map[string]*X509TrustStore, error) {
+	var result map[string]*X509TrustStore
+	trustStoreBasePath := "" // TODO get the trust store base path from Dir Structure functionality
+	for _, trustPolicy := range policyDocument.TrustPolicies {
+		trustStore := trustPolicy.TrustStore
+		i := strings.Index(trustStore, ":")
+		prefix := trustStore[:i]
+		name := trustStore[i+1:]
+		x509TrustStore, err := LoadX509TrustStore(filepath.Join(trustStoreBasePath, prefix, name))
+		if err != nil {
+			return nil, err
+		}
+		result[trustStore] = x509TrustStore
+	}
+	return result, nil
+}
 
 // isPresent is a utility function to check if a string exists in an array
 func isPresent(val string, values []string) bool {

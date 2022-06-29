@@ -70,7 +70,6 @@ func LoadX509TrustStore(path string) (*X509TrustStore, error) {
 	}
 
 	trustStore.Name = filepath.Base(path)
-	trustStore.Type =
 	trustStore.Path = path
 
 	return &trustStore, nil
