@@ -2,8 +2,9 @@ package plugin
 
 import (
 	"context"
+	"time"
 
-	"github.com/notaryproject/notation-go"
+	"github.com/notaryproject/notation-core-go/signer"
 )
 
 // Prefix is the prefix required on all plugin binary names.
@@ -23,18 +24,23 @@ const (
 
 	// CommandDescribeKey is the name of the plugin command
 	// which must be supported by every plugin that has the
-	// SIGNATURE_GENERATOR capability.
+	// SIGNATURE_GENERATOR.RAW capability.
 	CommandDescribeKey Command = "describe-key"
 
 	// CommandGenerateSignature is the name of the plugin command
 	// which must be supported by every plugin that has the
-	// SIGNATURE_GENERATOR capability.
+	// SIGNATURE_GENERATOR.RAW capability.
 	CommandGenerateSignature Command = "generate-signature"
 
 	// CommandGenerateEnvelope is the name of the plugin command
 	// which must be supported by every plugin that has the
-	// SIGNATURE_ENVELOPE_GENERATOR capability.
+	// SIGNATURE_GENERATOR.ENVELOPE capability.
 	CommandGenerateEnvelope Command = "generate-envelope"
+
+	// CommandVerifySignature is the name of the plugin command
+	// which must be supported by every plugin that has
+	// any SIGNATURE_VERIFIER.* capability
+	CommandVerifySignature Command = "verify-signature"
 )
 
 // Capability is a feature available in the plugin contract.
@@ -42,16 +48,52 @@ type Capability string
 
 const (
 	// CapabilitySignatureGenerator is the name of the capability
-	// which should support a plugin to support generating signatures.
-	CapabilitySignatureGenerator Capability = "SIGNATURE_GENERATOR"
+	// for a plugin to support generating raw signatures.
+	CapabilitySignatureGenerator Capability = "SIGNATURE_GENERATOR.RAW"
 
 	// CapabilityEnvelopeGenerator is the name of the capability
-	// which should support a plugin to support generating envelope signatures.
-	CapabilityEnvelopeGenerator Capability = "SIGNATURE_ENVELOPE_GENERATOR"
+	// for a plugin to support generating envelope signatures.
+	CapabilityEnvelopeGenerator Capability = "SIGNATURE_GENERATOR.ENVELOPE"
+
+	// CapabilityTrustedIdentityVerifier is the name of the capability
+	// for a plugin to support verifying trusted identities.
+	CapabilityTrustedIdentityVerifier = Capability(VerificationCapabilityTrustedIdentity)
+
+	// CapabilityRevocationCheckVerifier is the name of the capability
+	// for a plugin to support verifying revocation checks.
+	CapabilityRevocationCheckVerifier = Capability(VerificationCapabilityRevocationCheck)
+)
+
+// VerificationCapability is a verification feature available in the plugin contract.
+type VerificationCapability string
+
+const (
+	// VerificationCapabilityTrustedIdentity is the name of the capability
+	// for a plugin to support verifying trusted identities.
+	VerificationCapabilityTrustedIdentity VerificationCapability = "SIGNATURE_VERIFIER.TRUSTED_IDENTITY"
+
+	// VerificationCapabilityRevocationCheck is the name of the capability
+	// for a plugin to support verifying revocation checks.
+	VerificationCapabilityRevocationCheck VerificationCapability = "SIGNATURE_VERIFIER.REVOCATION_CHECK"
+)
+
+// SigningScheme formalizes the feature set provided by the signature produced using a signing scheme
+type SigningScheme string
+
+const (
+	// SigningSchemeDefault defines a signing scheme that uses the traditional signing workflow
+	// in which an end user generates signatures using X.509 certificates
+	SigningSchemeDefault SigningScheme = "notary.default.x509"
+
+	// SigningSchemeAuthority defines a signing scheme in which a signing authority
+	// generates signatures on behalf of an end user using X.509 certificates
+	SigningSchemeAuthority SigningScheme = "notary.signingAuthority.x509"
 )
 
 // GetMetadataRequest contains the parameters passed in a get-plugin-metadata request.
-type GetMetadataRequest struct{}
+type GetMetadataRequest struct {
+	PluginConfig map[string]string `json:"pluginConfig,omitempty"`
+}
 
 func (GetMetadataRequest) Command() Command {
 	return CommandGetMetadata
@@ -68,22 +110,22 @@ func (DescribeKeyRequest) Command() Command {
 	return CommandDescribeKey
 }
 
-// GenerateSignatureResponse is the response of a describe-key request.
+// DescribeKeyResponse is the response of a describe-key request.
 type DescribeKeyResponse struct {
 	// The same key id as passed in the request.
 	KeyID string `json:"keyId"`
 
 	// One of following supported key types:
 	// https://github.com/notaryproject/notaryproject/blob/main/signature-specification.md#algorithm-selection
-	KeySpec notation.KeySpec `json:"keySpec"`
+	KeySpec signer.KeySpec `json:"keySpec"`
 }
 
 // GenerateSignatureRequest contains the parameters passed in a generate-signature request.
 type GenerateSignatureRequest struct {
 	ContractVersion string                 `json:"contractVersion"`
 	KeyID           string                 `json:"keyId"`
-	KeySpec         notation.KeySpec       `json:"keySpec"`
-	Hash            notation.HashAlgorithm `json:"hashAlgorithm"`
+	KeySpec         signer.KeySpec         `json:"keySpec"`
+	Hash            string                 `json:"hashAlgorithm"`
 	Payload         []byte                 `json:"payload"`
 	PluginConfig    map[string]string      `json:"pluginConfig,omitempty"`
 }
@@ -96,7 +138,7 @@ func (GenerateSignatureRequest) Command() Command {
 type GenerateSignatureResponse struct {
 	KeyID            string                      `json:"keyId"`
 	Signature        []byte                      `json:"signature"`
-	SigningAlgorithm notation.SignatureAlgorithm `json:"signingAlgorithm"`
+	SigningAlgorithm signer.SignatureAlgorithm   `json:"signingAlgorithm"`
 
 	// Ordered list of certificates starting with leaf certificate
 	// and ending with root certificate.
@@ -117,11 +159,57 @@ func (GenerateEnvelopeRequest) Command() Command {
 	return CommandGenerateEnvelope
 }
 
-// GenerateSignatureResponse is the response of a generate-envelope request.
+// GenerateEnvelopeResponse is the response of a generate-envelope request.
 type GenerateEnvelopeResponse struct {
 	SignatureEnvelope     []byte            `json:"signatureEnvelope"`
 	SignatureEnvelopeType string            `json:"signatureEnvelopeType"`
 	Annotations           map[string]string `json:"annotations,omitempty"`
+}
+
+// VerifySignatureRequest contains the parameters passed in a verify-signature request.
+type VerifySignatureRequest struct {
+	ContractVersion string            `json:"contractVersion"`
+	Signature       Signature         `json:"signature"`
+	TrustPolicy     TrustPolicy       `json:"trustPolicy"`
+	PluginConfig    map[string]string `json:"pluginConfig,omitempty"`
+}
+
+// Signature represents a signature pulled from the envelope
+type Signature struct {
+	CriticalAttributes    CriticalAttributes `json:"criticalAttributes"`
+	UnprocessedAttributes []string           `json:"unprocessedAttributes"`
+	CertificateChain      [][]byte           `json:"certificateChain"`
+}
+
+// CriticalAttributes contains all Notary V2 defined critical
+// attributes and their values in the signature envelope
+type CriticalAttributes struct {
+	ContentType        string                 `json:"contentType"`
+	SigningScheme      string                 `json:"signingScheme"`
+	Expiry             *time.Time             `json:"expiry,omitempty"`
+	ExtendedAttributes map[string]interface{} `json:"extendedAttributes,omitempty"`
+}
+
+// TrustPolicy represents trusted identities that sign the artifacts
+type TrustPolicy struct {
+	TrustedIdentities     []string                 `json:"trustedIdentities"`
+	SignatureVerification []VerificationCapability `json:"signatureVerification"`
+}
+
+func (VerifySignatureRequest) Command() Command {
+	return CommandVerifySignature
+}
+
+// VerifySignatureResponse is the response of a generate-envelope request.
+type VerifySignatureResponse struct {
+	VerificationResults map[VerificationCapability]VerificationResult `json:"verificationResults"`
+	ProcessedAttributes []string                                      `json:"processedAttributes"`
+}
+
+// VerificationResult is the result of a verification performed by the plugin
+type VerificationResult struct {
+	Success bool   `json:"success"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // Request defines a plugin request, which is always associated to a command.
