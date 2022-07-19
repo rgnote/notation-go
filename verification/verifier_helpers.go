@@ -34,7 +34,19 @@ func (v *Verifier) verifyIntegrity(sigBlob []byte, sigManifest registry.Signatur
 		if err != nil {
 			switch err.(type) {
 			case nsigner.SignatureNotFoundError:
+				result = &VerificationResult{
+					Success: false,
+					Error:   err,
+					Type:    Integrity,
+					Action:  outcome.VerificationLevel.VerificationMap[Integrity],
+				}
 			case nsigner.MalformedSignatureError:
+				result = &VerificationResult{
+					Success: false,
+					Error:   err,
+					Type:    Integrity,
+					Action:  outcome.VerificationLevel.VerificationMap[Integrity],
+				}
 			case nsigner.SignatureIntegrityError:
 				result = &VerificationResult{
 					Success: false,
@@ -66,13 +78,22 @@ func (v *Verifier) verifyIntegrity(sigBlob []byte, sigManifest registry.Signatur
 
 func (v *Verifier) verifyAuthenticity(trustStorePrefix TrustStorePrefix, trustPolicy *TrustPolicy, outcome *SignatureVerificationOutcome) *VerificationResult {
 	// verify authenticity
-	trustStores, err := loadX509TrustStores(trustPolicy, "testdata/trust-store") // TODO get trust store path from dir structure PR
+	trustStores, err := loadX509TrustStores(trustPolicy, "/home/ANT.AMAZON.COM/garigant/GitHub/notation-go/verification/testdata/trust-store") // TODO get trust store path from dir structure PR
 
 	// filter trust certificates based on trust store prefix
 	var trustCerts []*x509.Certificate
 	for _, v := range trustStores {
 		if v.Prefix == string(trustStorePrefix) {
 			trustCerts = append(trustCerts, v.Certificates...)
+		}
+	}
+
+	if len(trustCerts) < 1 {
+		return &VerificationResult{
+			Success: false,
+			Error:   ErrorVerificationInconclusive{msg: "no trusted certificates are found to verify authenticity"},
+			Type:    Authenticity,
+			Action:  outcome.VerificationLevel.VerificationMap[Authenticity],
 		}
 	}
 	_, err = nsigner.VerifyAuthenticity(outcome.SignerInfo, trustCerts)
@@ -88,7 +109,7 @@ func (v *Verifier) verifyAuthenticity(trustStorePrefix TrustStorePrefix, trustPo
 		default:
 			return &VerificationResult{
 				Success: false,
-				Error:   ErrorVerificationInconclusive{msg: err.Error()},
+				Error:   ErrorVerificationInconclusive{msg: "Authenticity verification failed with error : " + err.Error()},
 				Type:    Authenticity,
 				Action:  outcome.VerificationLevel.VerificationMap[Authenticity],
 			}
@@ -112,6 +133,54 @@ func (v *Verifier) verifyExpiry(outcome *SignatureVerificationOutcome) *Verifica
 			Success: true,
 			Type:    Expiry,
 			Action:  outcome.VerificationLevel.VerificationMap[Expiry],
+		}
+	}
+}
+
+func (v *Verifier) verifyAuthenticTimestamp(outcome *SignatureVerificationOutcome) *VerificationResult {
+	invalidTimestamp := false
+	var err error
+
+	if outcome.SignerInfo.SigningScheme == nsigner.SigningSchemeX509Default {
+		// TODO verify the TSA signature
+		// we can't trust the signing time value until we verify the TSA signature
+		now := time.Now()
+		for _, cert := range outcome.SignerInfo.CertificateChain {
+			if now.Before(cert.NotBefore) {
+				invalidTimestamp = true
+				err = fmt.Errorf("certificate %q is not valid yet, it will be valid from %q", cert.Subject, cert.NotBefore.Format(time.RFC1123Z))
+				break
+			}
+			if now.After(cert.NotAfter) {
+				invalidTimestamp = true
+				err = fmt.Errorf("certificate %q is not valid anymore, it was expired at %q", cert.Subject, cert.NotAfter.Format(time.RFC1123Z))
+				break
+			}
+
+		}
+	} else if outcome.SignerInfo.SigningScheme == nsigner.SigningSchemeX509SigningAuthority {
+		signingTime := outcome.SignerInfo.SignedAttributes.SigningTime
+		for _, cert := range outcome.SignerInfo.CertificateChain {
+			if signingTime.Before(cert.NotBefore) || signingTime.After(cert.NotAfter) {
+				invalidTimestamp = true
+				err = fmt.Errorf("certificate %q was not valid when the digital signature was produced at %q", cert.Subject, signingTime.Format(time.RFC1123Z))
+				break
+			}
+		}
+	}
+
+	if invalidTimestamp {
+		return &VerificationResult{
+			Success: false,
+			Error:   err,
+			Type:    AuthenticTimestamp,
+			Action:  outcome.VerificationLevel.VerificationMap[AuthenticTimestamp],
+		}
+	} else {
+		return &VerificationResult{
+			Success: true,
+			Type:    AuthenticTimestamp,
+			Action:  outcome.VerificationLevel.VerificationMap[AuthenticTimestamp],
 		}
 	}
 }

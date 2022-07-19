@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "trustPolicies": [
+    {
+      "name": "wabbit-networks-images",
+      "registryScopes": [ "*" ],
+      "signatureVerification" : "strict",
+      "trustStores": ["ca:valid-trust-store"],
+      "trustedIdentities": [
+        "x509.subject: CN=Notation Test Root,O=Notary,L=Seattle,ST=WA,C=US"
+      ]
+    }
+  ]
+}

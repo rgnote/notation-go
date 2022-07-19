@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/notaryproject/notation-core-go/signer"
 	"github.com/notaryproject/notation-go"
 	"github.com/notaryproject/notation-go/plugin"
 	"github.com/notaryproject/notation-go/plugin/manager"
@@ -24,7 +25,7 @@ type pluginManager interface {
 
 func NewVerifier(repository registry.Repository) (*Verifier, error) {
 	// load trust policy
-	policyDocument, err := loadPolicyDocument("") // TODO get the policy path from Dir Structure functionality
+	policyDocument, err := loadPolicyDocument("/home/ANT.AMAZON.COM/garigant/GitHub/notation-go/main/trustpolicy.json") // TODO get the policy path from Dir Structure functionality
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +107,7 @@ func (v *Verifier) Verify(ctx context.Context, artifactUri string) ([]*Signature
 		// artifact digest must match the digest from the signature payload
 		payload := &notation.Payload{}
 		err := json.Unmarshal(outcome.SignerInfo.Payload, payload)
-		if err != nil || artifactDescriptor.Equal(payload.TargetArtifact) {
+		if err != nil || !artifactDescriptor.Equal(payload.TargetArtifact) {
 			outcome.Error = fmt.Errorf("given digest %q does not match the digest %q present in the digital signature", artifactDigest, payload.TargetArtifact.Digest.String())
 			continue
 		}
@@ -128,6 +129,23 @@ func (v *Verifier) processSignature(sigBlob []byte, sigManifest registry.Signatu
 		return result.Error
 	}
 
+	var err error
+	switch signerInfo.SigningScheme {
+	case signer.SigningSchemeX509Default:
+		err = v.defaultVerification(result, trustPolicy, outcome)
+	case signer.SigningSchemeX509SigningAuthority:
+		err = v.signingAuthorityVerification(result, trustPolicy, outcome)
+	default:
+		err = ErrorVerificationInconclusive{msg: fmt.Sprintf("signing scheme %q is not support", signerInfo.SigningScheme)}
+	}
+
+	// Verify timestamping signature if present - Not in RC1
+	// Verify revocation - Not in RC1
+
+	return err
+}
+
+func (v *Verifier) defaultVerification(result *VerificationResult, trustPolicy *TrustPolicy, outcome *SignatureVerificationOutcome) error {
 	// verify x509 and trust identity based authenticity
 	result = v.verifyAuthenticity(TrustStorePrefixCA, trustPolicy, outcome)
 	outcome.VerificationResults = append(outcome.VerificationResults, result)
@@ -141,9 +159,24 @@ func (v *Verifier) processSignature(sigBlob []byte, sigManifest registry.Signatu
 	if isCriticalFailure(result) {
 		return result.Error
 	}
+	return nil
+}
 
-	// Verify timestamping signature if present - Not in RC1
-	// Verify revocation - Not in RC1
-	// no error
+func (v *Verifier) signingAuthorityVerification(result *VerificationResult, trustPolicy *TrustPolicy, outcome *SignatureVerificationOutcome) error {
+	// verify x509 and trust identity based authenticity
+	result = v.verifyAuthenticity(TrustStorePrefixSigningAuthority, trustPolicy, outcome)
+	outcome.VerificationResults = append(outcome.VerificationResults, result)
+	if isCriticalFailure(result) {
+		return result.Error
+	}
+
+	// verify authentic timestamp
+
+	// verify expiry
+	result = v.verifyExpiry(outcome)
+	outcome.VerificationResults = append(outcome.VerificationResults, result)
+	if isCriticalFailure(result) {
+		return result.Error
+	}
 	return nil
 }

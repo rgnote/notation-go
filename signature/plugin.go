@@ -118,8 +118,9 @@ func (s *pluginSigner) generateSignature(ctx context.Context, desc notation.Desc
 		PayloadContentType:  signer.PayloadContentTypeV1,
 		SignatureProvider:   psp,
 		SigningTime:         time.Now(),
+		SigningScheme:       signer.SigningSchemeX509Default,
 		ExtendedSignedAttrs: nil,
-		SigningAgent:        "Notation/1.0.0",  // TODO: include external signing plugin's name and version. https://github.com/notaryproject/notation-go/issues/80
+		SigningAgent:        "Notation/1.0.0", // TODO: include external signing plugin's name and version. https://github.com/notaryproject/notation-go/issues/80
 	}
 	if !opts.Expiry.IsZero() {
 		signReq.Expiry = opts.Expiry
