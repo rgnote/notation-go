@@ -3,6 +3,7 @@ package notation
 import (
 	"context"
 	"crypto/x509"
+	nsigner "github.com/notaryproject/notation-core-go/signer"
 	"time"
 
 	"github.com/notaryproject/notation-go/crypto/timestamp"
@@ -40,7 +41,12 @@ type Payload struct {
 // SignOptions contains parameters for Signer.Sign.
 type SignOptions struct {
 	// Expiry identifies the expiration time of the resulted signature.
-	Expiry time.Time
+	Expiry                    time.Time
+	SigningTime               time.Time
+	Scheme                    nsigner.SigningScheme
+	ExtendedAttributes        []nsigner.Attribute
+	VerificationPlugin        string
+	VerificationPluginVersion string
 
 	// TSA is the TimeStamp Authority to timestamp the resulted signature if present.
 	TSA timestamp.Timestamper

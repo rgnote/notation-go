@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
-
 	"github.com/notaryproject/notation-core-go/signer"
 	"github.com/notaryproject/notation-go"
 	"github.com/notaryproject/notation-go/plugin"
@@ -113,13 +111,16 @@ func (s *pluginSigner) generateSignature(ctx context.Context, desc notation.Desc
 		keyID:   s.keyID,
 		keySpec: key.KeySpec,
 	}
+
 	signReq := signer.SignRequest{
 		Payload:             payloadBytes,
 		PayloadContentType:  signer.PayloadContentTypeV1,
 		SignatureProvider:   psp,
-		SigningTime:         time.Now(),
-		SigningScheme:       signer.SigningSchemeX509Default,
-		ExtendedSignedAttrs: nil,
+		SigningTime:         opts.SigningTime,
+		SigningScheme:       opts.Scheme,
+		Expiry:              opts.Expiry,
+		ExtendedSignedAttrs: opts.ExtendedAttributes,
+		VerificationPlugin:  opts.VerificationPlugin,
 		SigningAgent:        "Notation/1.0.0", // TODO: include external signing plugin's name and version. https://github.com/notaryproject/notation-go/issues/80
 	}
 	if !opts.Expiry.IsZero() {

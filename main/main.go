@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"fmt"
+	nsigner "github.com/notaryproject/notation-core-go/signer"
 	"github.com/notaryproject/notation-core-go/testhelper"
 	"github.com/notaryproject/notation-go"
 	nregistry "github.com/notaryproject/notation-go/registry"
@@ -13,6 +14,7 @@ import (
 	"github.com/notaryproject/notation-go/verification"
 	"oras.land/oras-go/v2/registry"
 	"oras.land/oras-go/v2/registry/remote/auth"
+	"time"
 )
 
 func sign(refString string) error {
@@ -41,25 +43,65 @@ func sign(refString string) error {
 		return err
 	}
 
-	signature, err := signer.Sign(ctx, artifactDescriptor, notation.SignOptions{})
+	signCombinations(nsigner.SigningSchemeX509Default, signer, artifactDescriptor, repo)
+	signCombinations(nsigner.SigningSchemeX509SigningAuthority, signer, artifactDescriptor, repo)
+	return nil
+}
+
+func signCombinations(scheme nsigner.SigningScheme, signer notation.Signer, desc notation.Descriptor, repo *nregistry.RepositoryClient) error {
+	ctx := context.Background()
+	// Valid
+	fmt.Println("Valid + " + scheme)
+	opts := notation.SignOptions{
+		Scheme:             scheme,
+		SigningTime:        time.Date(2020, 11, 9, 7, 0, 0, 0, time.UTC),
+		Expiry:             time.Date(2120, 11, 9, 7, 0, 0, 0, time.UTC),
+		ExtendedAttributes: nil,
+	}
+	signature, err := signer.Sign(ctx, desc, opts)
 	if err != nil {
 		return err
 	}
-
-	fmt.Println("Signature :")
+	//manifest, _, err := repo.PutSignatureManifest(ctx, signature, desc, nil)
 	fmt.Println(string(signature))
 
-	manifest, signatureManifest, err := repo.PutSignatureManifest(ctx, signature, artifactDescriptor, nil)
-
+	// Expired
+	fmt.Println("Expired + " + scheme)
+	opts = notation.SignOptions{
+		Scheme:             scheme,
+		SigningTime:        time.Date(2022, 7, 29, 0, 0, 0, 0, time.UTC),
+		Expiry:             time.Date(2022, 7, 29, 23, 59, 0, 0, time.UTC),
+		ExtendedAttributes: nil,
+	}
+	signature, err = signer.Sign(ctx, desc, opts)
 	if err != nil {
 		return err
 	}
+	//manifest, _, err = repo.PutSignatureManifest(ctx, signature, desc, nil)
+	fmt.Println(string(signature))
 
-	fmt.Println("Signature Manifest :")
-	fmt.Println(manifest)
-
-	fmt.Println("Signature Envelope :")
-	fmt.Println(signatureManifest)
+	// Plugin
+	fmt.Println("Plugin + " + scheme)
+	opts = notation.SignOptions{
+		Scheme:                    scheme,
+		SigningTime:               time.Date(2020, 11, 9, 7, 0, 0, 0, time.UTC),
+		Expiry:                    time.Date(2120, 11, 9, 7, 0, 0, 0, time.UTC),
+		VerificationPlugin:        "plugin-name",
+		VerificationPluginVersion: "1.1.1",
+		ExtendedAttributes: []nsigner.Attribute{
+			{
+				Key:      "SomeKey",
+				Critical: true,
+				Value:    "SomeValue",
+			},
+		},
+	}
+	signature, err = signer.Sign(ctx, desc, opts)
+	if err != nil {
+		return err
+	}
+	//manifest, _, err = repo.PutSignatureManifest(ctx, signature, desc, nil)
+	fmt.Println(string(signature))
 	return nil
 }
 
