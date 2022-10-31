@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
@@ -128,7 +129,7 @@ func testSignerFromFile(t *testing.T, keyCert *keyCertPair, envelopeType, dir st
 		t.Fatalf("Sign() failed: %v", err)
 	}
 	// basic verification
-	basicVerification(t, sig, envelopeType, keyCert.certs[len(keyCert.certs)-1])
+	basicVerification(t, sig, envelopeType, keyCert.certs[len(keyCert.certs)-1], builtInPluginMetaData)
 }
 
 func TestNewSignerFromFiles(t *testing.T) {
@@ -181,7 +182,7 @@ func TestSignWithTimestamp(t *testing.T) {
 				}
 
 				// basic verification
-				basicVerification(t, sig, envelopeType, keyCert.certs[len(keyCert.certs)-1])
+				basicVerification(t, sig, envelopeType, keyCert.certs[len(keyCert.certs)-1], builtInPluginMetaData)
 			})
 		}
 	}
@@ -206,7 +207,7 @@ func TestSignWithoutExpiry(t *testing.T) {
 				}
 
 				// basic verification
-				basicVerification(t, sig, envelopeType, keyCert.certs[len(keyCert.certs)-1])
+				basicVerification(t, sig, envelopeType, keyCert.certs[len(keyCert.certs)-1], builtInPluginMetaData)
 			})
 		}
 	}
@@ -255,7 +256,7 @@ func TestExternalSigner_Sign(t *testing.T) {
 				t.Fatalf("Sign() error = %v", err)
 			}
 			// basic verification
-			basicVerification(t, sig, envelopeType, keyCert.certs[len(keyCert.certs)-1])
+			basicVerification(t, sig, envelopeType, keyCert.certs[len(keyCert.certs)-1], &validMetadata)
 		}
 	}
 }
@@ -275,7 +276,7 @@ func TestExternalSigner_SignEnvelope(t *testing.T) {
 					t.Fatalf("Sign() error = %v", err)
 				}
 				// basic verification
-				basicVerification(t, sig, envelopeType, keyCert.certs[len(keyCert.certs)-1])
+				basicVerification(t, sig, envelopeType, keyCert.certs[len(keyCert.certs)-1], &validMetadata)
 			})
 		}
 	}
@@ -315,7 +316,7 @@ func generateKeyCertPair() (crypto.PrivateKey, []*x509.Certificate, error) {
 	return pk, []*x509.Certificate{certTuple.Cert, rsaRoot.Cert}, nil
 }
 
-func basicVerification(t *testing.T, sig []byte, envelopeType string, trust *x509.Certificate) {
+func basicVerification(t *testing.T, sig []byte, envelopeType string, trust *x509.Certificate, metadata *plugin.Metadata) {
 	// basic verification
 	sigEnv, err := signature.ParseEnvelope(envelopeType, sig)
 	if err != nil {
@@ -335,6 +336,22 @@ func basicVerification(t *testing.T, sig []byte, envelopeType string, trust *x50
 	if err != nil || !trustedCert.Equal(trust) {
 		t.Fatalf("VerifyAuthenticity failed. error = %v", err)
 	}
+
+	verifySigningAgent(t, envContent.SignerInfo.UnsignedAttributes.SigningAgent, metadata)
+}
+
+func verifySigningAgent(t *testing.T, signingAgent string, metadata *plugin.Metadata) {
+	signingAgentRegex := regexp.MustCompile("^(?P<agent>.*);(?P<name>.*)/(?P<version>.*)$")
+	match := signingAgentRegex.FindStringSubmatch(signingAgent)
+
+	results := map[string]string{}
+	for i, name := range match {
+		results[signingAgentRegex.SubexpNames()[i]] = name
+	}
+
+	if results["agent"] != notation.SigningAgent || results["name"] != metadata.Name || results["version"] != metadata.Version {
+		t.Fatalf("Expected signingAgent of %s;%s/%s but signature contained %s instead", notation.SigningAgent, metadata.Name, metadata.Version, signingAgent)
+	}
 }
 
 func validateSignWithCerts(t *testing.T, envelopeType string, key crypto.PrivateKey, certs []*x509.Certificate) {
@@ -351,5 +368,5 @@ func validateSignWithCerts(t *testing.T, envelopeType string, key crypto.Private
 	}
 
 	// basic verification
-	basicVerification(t, sig, envelopeType, certs[len(certs)-1])
+	basicVerification(t, sig, envelopeType, certs[len(certs)-1], builtInPluginMetaData)
 }

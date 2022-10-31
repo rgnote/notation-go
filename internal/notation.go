@@ -35,6 +35,17 @@ func (d Descriptor) Equal(t Descriptor) bool {
 	return d.MediaType == t.MediaType && d.Digest == t.Digest && d.Size == t.Size
 }
 
+// DescriptorAnnotationsPartialEqual checks that newDesc hasn't replaced or overridden existing annotations.
+func (d Descriptor) DescriptorAnnotationsPartialEqual(t Descriptor) bool {
+	// Plugins may append additional annotations but not replace/override existing.
+	for k, v := range d.Annotations {
+		if v2, ok := t.Annotations[k]; !ok || v != v2 {
+			return false
+		}
+	}
+	return true
+}
+
 // Payload describes the content that gets signed.
 type Payload struct {
 	TargetArtifact Descriptor `json:"targetArtifact"`

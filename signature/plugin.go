@@ -56,7 +56,7 @@ func (s *pluginSigner) Sign(ctx context.Context, desc notation.Descriptor, opts 
 		)
 	}
 	if metadata.HasCapability(plugin.CapabilitySignatureGenerator) {
-		return s.generateSignature(ctx, desc, opts)
+		return s.generateSignature(ctx, desc, opts, metadata)
 	} else if metadata.HasCapability(plugin.CapabilityEnvelopeGenerator) {
 		return s.generateSignatureEnvelope(ctx, desc, opts)
 	}
@@ -95,7 +95,7 @@ func (s *pluginSigner) describeKey(ctx context.Context, config map[string]string
 	return resp, nil
 }
 
-func (s *pluginSigner) generateSignature(ctx context.Context, desc notation.Descriptor, opts notation.SignOptions) ([]byte, error) {
+func (s *pluginSigner) generateSignature(ctx context.Context, desc notation.Descriptor, opts notation.SignOptions, metadata *plugin.Metadata) ([]byte, error) {
 	config := s.mergeConfig(opts.PluginConfig)
 	// Get key info.
 	key, err := s.describeKey(ctx, config)
@@ -123,6 +123,7 @@ func (s *pluginSigner) generateSignature(ctx context.Context, desc notation.Desc
 		}
 		extProvider.prepareSigning(config, ks)
 	}
+	signingAgentId := fmt.Sprintf("%s;%s/%s", notation.SigningAgent, metadata.Name, metadata.Version)
 	signReq := &signature.SignRequest{
 		Payload: signature.Payload{
 			ContentType: notation.MediaTypePayloadV1,
@@ -132,7 +133,7 @@ func (s *pluginSigner) generateSignature(ctx context.Context, desc notation.Desc
 		SigningTime:              time.Now(),
 		ExtendedSignedAttributes: nil,
 		SigningScheme:            signature.SigningSchemeX509,
-		SigningAgent:             notation.SigningAgent, // TODO: include external signing plugin's name and version. https://github.com/notaryproject/notation-go/issues/80
+		SigningAgent:             signingAgentId,
 	}
 
 	if !opts.Expiry.IsZero() {
@@ -220,32 +221,40 @@ func (s *pluginSigner) generateSignatureEnvelope(ctx context.Context, desc notat
 		return nil, err
 	}
 
+	content := envContent.Payload.Content
 	var signedPayload notation.Payload
-	if err = json.Unmarshal(envContent.Payload.Content, &signedPayload); err != nil {
+	if err = json.Unmarshal(content, &signedPayload); err != nil {
 		return nil, fmt.Errorf("signed envelope payload can't be unmarshaled: %w", err)
 	}
 
-	// TODO: Verify plugin didnot add any additional top level payload attributes. https://github.com/notaryproject/notation-go/issues/80
-	if !descriptorPartialEqual(desc, signedPayload.TargetArtifact) {
+	if !isPayloadDescriptorValid(content, desc, signedPayload.TargetArtifact) {
 		return nil, errors.New("descriptor subject has changed")
 	}
 
 	return resp.SignatureEnvelope, nil
 }
 
-// descriptorPartialEqual checks if the both descriptors point to the same resource
-// and that newDesc hasn't replaced or overridden existing annotations.
-func descriptorPartialEqual(original, newDesc notation.Descriptor) bool {
-	if !original.Equal(newDesc) {
-		return false
-	}
-	// Plugins may append additional annotations but not replace/override existing.
-	for k, v := range original.Annotations {
-		if v2, ok := newDesc.Annotations[k]; !ok || v != v2 {
-			return false
-		}
-	}
-	return true
+func isPayloadDescriptorValid(signedContent []byte, originalDesc, newDesc notation.Descriptor) bool {
+	return originalDesc.Equal(newDesc) &&
+		originalDesc.DescriptorAnnotationsPartialEqual(newDesc) &&
+		!isUnknownAttributeAdded(signedContent)
+}
+
+// TODO: unit test this method: https://github.com/notaryproject/notation-go/issues/194
+// isUnknownAttributeAdded checks that the unmarshalled json content does not have any unexpected keys added
+func isUnknownAttributeAdded(content []byte) bool {
+	var targetArtifactMap map[string]interface{}
+	// Ignoring error because we already successfully unmarshalled before this point
+	_ = json.Unmarshal(content, &targetArtifactMap)
+	descriptor := targetArtifactMap["targetArtifact"].(map[string]interface{})
+
+	// Explicitly remove expected keys to check if any are left over
+	delete(descriptor, "mediaType")
+	delete(descriptor, "digest")
+	delete(descriptor, "size")
+	delete(descriptor, "annotations")
+
+	return len(targetArtifactMap) != 1 || len(descriptor) != 0
 }
 
 func parseCertChain(certChain [][]byte) ([]*x509.Certificate, error) {

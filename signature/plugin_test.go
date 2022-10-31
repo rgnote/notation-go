@@ -479,7 +479,7 @@ func TestSigner_Sign_SignatureVerifyError(t *testing.T) {
 	}
 }
 
-func basicSignTest(t *testing.T, pluginSigner *pluginSigner) {
+func basicSignTest(t *testing.T, pluginSigner *pluginSigner, metadata *plugin.Metadata) {
 	data, err := pluginSigner.Sign(context.Background(), validSignDescriptor, validSignOpts)
 	if err != nil {
 		t.Fatalf("Signer.Sign() error = %v, wantErr nil", err)
@@ -541,7 +541,7 @@ func basicSignTest(t *testing.T, pluginSigner *pluginSigner) {
 	if !reflect.DeepEqual(certChain, signerInfo.CertificateChain) {
 		t.Fatalf(" Signer.Sign() cert chain changed")
 	}
-	basicVerification(t, data, pluginSigner.envelopeMediaType, certChain[len(certChain)-1])
+	basicVerification(t, data, pluginSigner.envelopeMediaType, certChain[len(certChain)-1], metadata)
 }
 
 func TestSigner_Sign_Valid(t *testing.T) {
@@ -552,7 +552,7 @@ func TestSigner_Sign_Valid(t *testing.T) {
 					sigProvider:       newTestBuiltInProvider(keyCert),
 					envelopeMediaType: envelopeType,
 				}
-				basicSignTest(t, &pluginSigner)
+				basicSignTest(t, &pluginSigner, builtInPluginMetaData)
 			})
 			keyID := "Key"
 			t.Run(fmt.Sprintf("external plugin,envelopeType=%v_keySpec=%v", envelopeType, keyCert.keySpecName), func(t *testing.T) {
@@ -561,7 +561,7 @@ func TestSigner_Sign_Valid(t *testing.T) {
 					envelopeMediaType: envelopeType,
 					keyID:             keyID,
 				}
-				basicSignTest(t, &pluginSigner)
+				basicSignTest(t, &pluginSigner, &validMetadata)
 			})
 		}
 	}
@@ -825,7 +825,7 @@ func TestPluginSigner_SignEnvelope_Valid(t *testing.T) {
 					sigProvider:       newMockEnvelopeProvider(keyCert.key, keyCert.certs, ""),
 					envelopeMediaType: envelopeType,
 				}
-				basicSignTest(t, &signer)
+				basicSignTest(t, &signer, &validMetadata)
 			})
 		}
 	}
