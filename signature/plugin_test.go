@@ -602,6 +602,56 @@ func TestPluginSigner_SignEnvelope_InvalidEnvelopeType(t *testing.T) {
 	}
 }
 
+func TestPluginSigner_SignEnvelope_ModifiedDesc(t *testing.T) {
+	for _, envelopeType := range signature.RegisteredEnvelopeTypes() {
+		t.Run(fmt.Sprintf("envelopeType=%s", envelopeType), func(t *testing.T) {
+			p := newDefaultMockProvider(
+				withMetaData(validMetaDataWithEnvelopeGeneratorCapabilityFunc),
+				withGenerateEnvelope(func(ctx context.Context, r plugin.Request) (interface{}, error) {
+					var payload map[string]interface{}
+					if err := json.Unmarshal(r.(*plugin.GenerateEnvelopeRequest).Payload, &payload); err != nil {
+						return nil, err
+					}
+					payload["additional_field"] = "some_string"
+
+					updatedPayload, err := json.Marshal(payload)
+					if err != nil {
+						return nil, err
+					}
+
+					signReq := &signature.SignRequest{
+						Payload: signature.Payload{
+							ContentType: notation.MediaTypePayloadV1,
+							Content:     updatedPayload,
+						},
+						Signer:                   newMockProvider(defaultKeyCert.key, defaultKeyCert.certs, ""),
+						SigningTime:              time.Now(),
+						ExtendedSignedAttributes: nil,
+						SigningScheme:            signature.SigningSchemeX509,
+						SigningAgent:             "testing agent",
+					}
+
+					sigEnv, err := signature.NewEnvelope(envelopeType)
+					if err != nil {
+						return nil, err
+					}
+
+					sig, err := sigEnv.Sign(signReq)
+					return &plugin.GenerateEnvelopeResponse{
+						SignatureEnvelope:     sig,
+						SignatureEnvelopeType: envelopeType,
+					}, err
+				}),
+			)
+			signer := pluginSigner{
+				sigProvider:       p,
+				envelopeMediaType: envelopeType,
+			}
+			testSignerError(t, signer, fmt.Sprintf("descriptor subject has changed"))
+		})
+	}
+}
+
 // newMockEnvelopeProvider creates a mock envelope provider.
 func newMockEnvelopeProvider(key crypto.PrivateKey, certs []*x509.Certificate, keyID string, opts ...optionFunc) *mockProvider {
 	internalProvider := newMockProvider(key, certs, "")
