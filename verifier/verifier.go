@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/mod/semver"
@@ -513,23 +514,65 @@ func (v *verifier) processSignature(ctx context.Context, sigBlob []byte, envelop
 		return expiryResult.Error
 	}
 
-	// verify authentic timestamp
+	// verify authentic timestamp (steps 1-4 of timestamp verification, excluding
+	// the timestamping cert chain revocation check). The revocation portion is
+	// fanned out below so it can run in parallel with the signing cert chain
+	// revocation check — see notation-go#422.
 	logger.Debug("Validating authentic timestamp")
-	authenticTimestampResult := verifyAuthenticTimestamp(ctx, policyName, trustStores, signatureVerification, v.trustStore, v.revocationTimestampingValidator, outcome)
+	authenticTimestampResult, tsaCertChain := verifyAuthenticTimestamp(ctx, policyName, trustStores, signatureVerification, v.trustStore, outcome)
+
+	// Decide whether revocation checks should run at all. This mirrors the
+	// gating that previously surrounded only the signing-chain check.
+	revocationEnabled := outcome.VerificationLevel.Enforcement[trustpolicy.TypeRevocation] != trustpolicy.ActionSkip &&
+		!slices.Contains(pluginCapabilities, pluginframework.CapabilityRevocationCheckVerifier)
+
+	var revocationResult *notation.ValidationResult
+	if revocationEnabled && !isCriticalFailure(authenticTimestampResult) {
+		logger.Debug("Validating revocation")
+
+		// Run signing cert chain revocation and timestamping cert chain
+		// revocation concurrently. The two underlying ValidateContext calls hit
+		// different validators and different cert chains, and either may issue
+		// network requests (OCSP / CRL), so parallelising the I/O is the main
+		// win here.
+		//
+		// Note: if either check turns out to be a critical failure we still
+		// pay for the other one — that's the accepted tradeoff for the common
+		// (success) path. We could plumb a cancellable context to short-circuit
+		// the loser, but that adds complexity for a rare case.
+		var (
+			wg              sync.WaitGroup
+			tsRevocationErr error
+		)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			revocationResult = v.verifyRevocation(ctx, outcome)
+		}()
+		if tsaCertChain != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				tsRevocationErr = verifyTimestampingCertChainRevocation(ctx, tsaCertChain, v.revocationTimestampingValidator)
+			}()
+		}
+		wg.Wait()
+
+		// A timestamping cert chain revocation failure is surfaced on the
+		// authentic-timestamp ValidationResult, preserving the prior contract
+		// where step 5 of timestamp verification lived inside that result.
+		if tsRevocationErr != nil {
+			authenticTimestampResult.Error = tsRevocationErr
+		}
+	}
+
 	outcome.VerificationResults = append(outcome.VerificationResults, authenticTimestampResult)
 	logVerificationResult(logger, authenticTimestampResult)
 	if isCriticalFailure(authenticTimestampResult) {
 		return authenticTimestampResult.Error
 	}
 
-	// verify revocation
-	// check if we need to bypass the revocation check, since revocation can be
-	// skipped using a trust policy or a plugin may override the check
-	if outcome.VerificationLevel.Enforcement[trustpolicy.TypeRevocation] != trustpolicy.ActionSkip &&
-		!slices.Contains(pluginCapabilities, pluginframework.CapabilityRevocationCheckVerifier) {
-
-		logger.Debug("Validating revocation")
-		revocationResult := v.verifyRevocation(ctx, outcome)
+	if revocationResult != nil {
 		outcome.VerificationResults = append(outcome.VerificationResults, revocationResult)
 		logVerificationResult(logger, revocationResult)
 		if isCriticalFailure(revocationResult) {
@@ -785,18 +828,36 @@ func verifyExpiry(outcome *notation.VerificationOutcome) *notation.ValidationRes
 	}
 }
 
-func verifyAuthenticTimestamp(ctx context.Context, policyName string, trustStores []string, signatureVerification trustpolicy.SignatureVerification, x509TrustStore truststore.X509TrustStore, r revocation.Validator, outcome *notation.VerificationOutcome) *notation.ValidationResult {
+// verifyAuthenticTimestamp validates the authentic timestamp of the signature.
+// In addition to the validation result, it returns the timestamping certificate
+// chain so that the caller can run the timestamping certificate chain
+// revocation check concurrently with the signing certificate chain revocation
+// check. The returned tsaCertChain is non-nil only when:
+//   - the signing scheme is notary.x509,
+//   - timestamp verification was actually performed (i.e. a TSA trust store is
+//     configured in the trust policy and the timestamp signature was verified
+//     successfully through step 4 of verifyTimestamp).
+//
+// In every other case (signingAuthority scheme, timestamp verification
+// disabled, or any error during timestamp verification), tsaCertChain is nil
+// and the caller MUST NOT attempt a timestamping cert chain revocation check.
+func verifyAuthenticTimestamp(ctx context.Context, policyName string, trustStores []string, signatureVerification trustpolicy.SignatureVerification, x509TrustStore truststore.X509TrustStore, outcome *notation.VerificationOutcome) (*notation.ValidationResult, []*x509.Certificate) {
 	logger := log.GetLogger(ctx)
 
 	signerInfo := outcome.EnvelopeContent.SignerInfo
 	// under signing scheme notary.x509
 	if signerInfo.SignedAttributes.SigningScheme == signature.SigningSchemeX509 {
 		logger.Debug("Under signing scheme notary.x509...")
-		return &notation.ValidationResult{
-			Error:  verifyTimestamp(ctx, policyName, trustStores, signatureVerification, x509TrustStore, r, outcome),
+		tsaCertChain, err := verifyTimestamp(ctx, policyName, trustStores, signatureVerification, x509TrustStore, outcome)
+		result := &notation.ValidationResult{
+			Error:  err,
 			Type:   trustpolicy.TypeAuthenticTimestamp,
 			Action: outcome.VerificationLevel.Enforcement[trustpolicy.TypeAuthenticTimestamp],
 		}
+		if err != nil {
+			return result, nil
+		}
+		return result, tsaCertChain
 	}
 
 	// under signing scheme notary.x509.signingAuthority
@@ -808,7 +869,7 @@ func verifyAuthenticTimestamp(ctx context.Context, policyName string, trustStore
 				Error:  fmt.Errorf("certificate %q was not valid when the digital signature was produced at %q", cert.Subject, authenticSigningTime.Format(time.RFC1123Z)),
 				Type:   trustpolicy.TypeAuthenticTimestamp,
 				Action: outcome.VerificationLevel.Enforcement[trustpolicy.TypeAuthenticTimestamp],
-			}
+			}, nil
 		}
 	}
 
@@ -816,7 +877,7 @@ func verifyAuthenticTimestamp(ctx context.Context, policyName string, trustStore
 	return &notation.ValidationResult{
 		Type:   trustpolicy.TypeAuthenticTimestamp,
 		Action: outcome.VerificationLevel.Enforcement[trustpolicy.TypeAuthenticTimestamp],
-	}
+	}, nil
 }
 
 // revocationFinalResult returns the final revocation result and problematic
@@ -991,7 +1052,15 @@ func isRequiredVerificationPluginVer(pluginVer string, minPluginVer string) bool
 
 // verifyTimestamp provides core verification logic of authentic timestamp under
 // signing scheme `notary.x509`.
-func verifyTimestamp(ctx context.Context, policyName string, trustStores []string, signatureVerification trustpolicy.SignatureVerification, x509TrustStore truststore.X509TrustStore, r revocation.Validator, outcome *notation.VerificationOutcome) error {
+//
+// On success, it returns the timestamping certificate chain (tsaCertChain) so
+// the caller can run the timestamping cert chain revocation check separately —
+// typically in parallel with the signing cert chain revocation check.
+// tsaCertChain is non-nil only when the timestamp signature was actually
+// verified (steps 1-4 below). If timestamp verification is disabled by the
+// trust policy or the signing cert chain validity check succeeds without a TSA,
+// tsaCertChain is nil and no timestamping revocation check should be performed.
+func verifyTimestamp(ctx context.Context, policyName string, trustStores []string, signatureVerification trustpolicy.SignatureVerification, x509TrustStore truststore.X509TrustStore, outcome *notation.VerificationOutcome) ([]*x509.Certificate, error) {
 	logger := log.GetLogger(ctx)
 
 	signerInfo := outcome.EnvelopeContent.SignerInfo
@@ -1000,7 +1069,7 @@ func verifyTimestamp(ctx context.Context, policyName string, trustStores []strin
 	// check if tsa trust store is configured in trust policy
 	tsaEnabled, err := isTSATrustStoreInPolicy(policyName, trustStores)
 	if err != nil {
-		return fmt.Errorf("failed to check tsa trust store configuration in turst policy with error: %w", err)
+		return nil, fmt.Errorf("failed to check tsa trust store configuration in turst policy with error: %w", err)
 	}
 	if !tsaEnabled {
 		logger.Info("Timestamp verification disabled: no tsa trust store is configured in trust policy")
@@ -1030,15 +1099,16 @@ func verifyTimestamp(ctx context.Context, policyName string, trustStores []strin
 	if !performTimestampVerification {
 		for _, cert := range signerInfo.CertificateChain {
 			if timeOfVerification.Before(cert.NotBefore) {
-				return fmt.Errorf("verification time is before certificate %q validity period, it will be valid from %q", cert.Subject, cert.NotBefore.Format(time.RFC1123Z))
+				return nil, fmt.Errorf("verification time is before certificate %q validity period, it will be valid from %q", cert.Subject, cert.NotBefore.Format(time.RFC1123Z))
 			}
 			if timeOfVerification.After(cert.NotAfter) {
-				return fmt.Errorf("verification time is after certificate %q validity period, it was expired at %q", cert.Subject, cert.NotAfter.Format(time.RFC1123Z))
+				return nil, fmt.Errorf("verification time is after certificate %q validity period, it was expired at %q", cert.Subject, cert.NotAfter.Format(time.RFC1123Z))
 			}
 		}
 
-		// success
-		return nil
+		// success — no timestamp signature was verified, so no
+		// tsaCertChain to return for downstream revocation checks.
+		return nil, nil
 	}
 
 	// Performing timestamp verification
@@ -1047,29 +1117,29 @@ func verifyTimestamp(ctx context.Context, policyName string, trustStores []strin
 	// 1. Timestamp countersignature MUST be present
 	logger.Debug("Checking timestamp countersignature existence...")
 	if len(signerInfo.UnsignedAttributes.TimestampSignature) == 0 {
-		return errors.New("no timestamp countersignature was found in the signature envelope")
+		return nil, errors.New("no timestamp countersignature was found in the signature envelope")
 	}
 
 	// 2. Verify the timestamp countersignature
 	logger.Debug("Verifying the timestamp countersignature...")
 	signedToken, err := tspclient.ParseSignedToken(signerInfo.UnsignedAttributes.TimestampSignature)
 	if err != nil {
-		return fmt.Errorf("failed to parse timestamp countersignature with error: %w", err)
+		return nil, fmt.Errorf("failed to parse timestamp countersignature with error: %w", err)
 	}
 	info, err := signedToken.Info()
 	if err != nil {
-		return fmt.Errorf("failed to get the timestamp TSTInfo with error: %w", err)
+		return nil, fmt.Errorf("failed to get the timestamp TSTInfo with error: %w", err)
 	}
 	timestamp, err := info.Validate(signerInfo.Signature)
 	if err != nil {
-		return fmt.Errorf("failed to get timestamp from timestamp countersignature with error: %w", err)
+		return nil, fmt.Errorf("failed to get timestamp from timestamp countersignature with error: %w", err)
 	}
 	trustTSACerts, err := loadX509TSATrustStores(ctx, outcome.EnvelopeContent.SignerInfo.SignedAttributes.SigningScheme, policyName, trustStores, x509TrustStore)
 	if err != nil {
-		return fmt.Errorf("failed to load tsa trust store with error: %w", err)
+		return nil, fmt.Errorf("failed to load tsa trust store with error: %w", err)
 	}
 	if len(trustTSACerts) == 0 {
-		return errors.New("no trusted TSA certificate found in trust store")
+		return nil, errors.New("no trusted TSA certificate found in trust store")
 	}
 	rootCertPool := x509.NewCertPool()
 	for _, trustedCerts := range trustTSACerts {
@@ -1080,13 +1150,13 @@ func verifyTimestamp(ctx context.Context, policyName string, trustStores []strin
 		Roots:       rootCertPool,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to verify the timestamp countersignature with error: %w", err)
+		return nil, fmt.Errorf("failed to verify the timestamp countersignature with error: %w", err)
 	}
 
 	// 3. Validate timestamping certificate chain
 	logger.Debug("Validating timestamping certificate chain...")
 	if err := nx509.ValidateTimestampingCertChain(tsaCertChain); err != nil {
-		return fmt.Errorf("failed to validate the timestamping certificate chain with error: %w", err)
+		return nil, fmt.Errorf("failed to validate the timestamping certificate chain with error: %w", err)
 	}
 	logger.Debug("The subject of TSA signing certificate is: ", tsaCertChain[0].Subject)
 
@@ -1095,17 +1165,33 @@ func verifyTimestamp(ctx context.Context, policyName string, trustStores []strin
 	logger.Debugf("Timestamp range: %s", timestamp.Format(time.RFC3339))
 	for _, cert := range signerInfo.CertificateChain {
 		if !timestamp.BoundedAfter(cert.NotBefore) {
-			return fmt.Errorf("timestamp can be before certificate %q validity period, it will be valid from %q", cert.Subject, cert.NotBefore.Format(time.RFC1123Z))
+			return nil, fmt.Errorf("timestamp can be before certificate %q validity period, it will be valid from %q", cert.Subject, cert.NotBefore.Format(time.RFC1123Z))
 		}
 		if !timestamp.BoundedBefore(cert.NotAfter) {
-			return fmt.Errorf("timestamp can be after certificate %q validity period, it was expired at %q", cert.Subject, cert.NotAfter.Format(time.RFC1123Z))
+			return nil, fmt.Errorf("timestamp can be after certificate %q validity period, it was expired at %q", cert.Subject, cert.NotAfter.Format(time.RFC1123Z))
 		}
 		if timeOfVerification.After(cert.NotAfter) {
 			logger.Debugf("Certificate %q expired at %q, but timestamp is within certificate validity period", cert.Subject, cert.NotAfter.Format(time.RFC1123Z))
 		}
 	}
 
-	// 5. Perform the timestamping certificate chain revocation check
+	// Step 5 (timestamping cert chain revocation) is intentionally NOT performed
+	// here — see verifyTimestampingCertChainRevocation. The caller runs that
+	// check concurrently with the signing cert chain revocation check.
+	logger.Debug("Timestamp signature verification (excluding revocation): Success")
+	return tsaCertChain, nil
+}
+
+// verifyTimestampingCertChainRevocation performs the revocation check on a
+// timestamping certificate chain returned from verifyTimestamp. It is split out
+// from verifyTimestamp so the caller can run it concurrently with the signing
+// certificate chain revocation check (notation-go#422).
+//
+// tsaCertChain must be non-nil; callers should skip this function when
+// verifyTimestamp returned a nil chain (timestamp verification was disabled or
+// the signing scheme is signingAuthority).
+func verifyTimestampingCertChainRevocation(ctx context.Context, tsaCertChain []*x509.Certificate, r revocation.Validator) error {
+	logger := log.GetLogger(ctx)
 	logger.Debug("Checking timestamping certificate chain revocation...")
 	certResults, err := r.ValidateContext(ctx, revocation.ValidateContextOptions{
 		CertChain: tsaCertChain,
@@ -1117,14 +1203,11 @@ func verifyTimestamp(ctx context.Context, policyName string, trustStores []strin
 	switch finalResult {
 	case revocationresult.ResultOK:
 		logger.Debug("No verification impacting errors encountered while checking timestamping certificate chain revocation, status is OK")
+		return nil
 	case revocationresult.ResultRevoked:
 		return fmt.Errorf("timestamping certificate with subject %q is revoked", problematicCertSubject)
 	default:
 		// revocationresult.ResultUnknown
 		return fmt.Errorf("timestamping certificate with subject %q revocation status is unknown", problematicCertSubject)
 	}
-
-	// success
-	logger.Debug("Timestamp verification: Success")
-	return nil
 }
