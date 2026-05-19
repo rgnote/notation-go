@@ -16,13 +16,11 @@ package verifier
 import (
 	"context"
 	"crypto/x509"
-	"net/http"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/notaryproject/notation-core-go/revocation"
-	"github.com/notaryproject/notation-core-go/revocation/purpose"
+	revocationresult "github.com/notaryproject/notation-core-go/revocation/result"
 	"github.com/notaryproject/notation-core-go/signature"
 	"github.com/notaryproject/notation-core-go/signature/cose"
 	"github.com/notaryproject/notation-core-go/signature/jws"
@@ -31,6 +29,20 @@ import (
 	"github.com/notaryproject/notation-go/verifier/trustpolicy"
 	"github.com/notaryproject/notation-go/verifier/truststore"
 )
+
+// okRevocationValidator is a stub revocation.Validator that unconditionally
+// returns ResultOK for every certificate in the chain. Used in tests that need
+// to exercise code paths beyond the revocation network call without making real
+// OCSP/CRL requests.
+type okRevocationValidator struct{}
+
+func (okRevocationValidator) ValidateContext(_ context.Context, opts revocation.ValidateContextOptions) ([]*revocationresult.CertRevocationResult, error) {
+	results := make([]*revocationresult.CertRevocationResult, len(opts.CertChain))
+	for i := range results {
+		results[i] = &revocationresult.CertRevocationResult{Result: revocationresult.ResultOK}
+	}
+	return results, nil
+}
 
 func TestAuthenticTimestamp(t *testing.T) {
 	dir.UserConfigDir = "testdata"
@@ -44,13 +56,6 @@ func TestAuthenticTimestamp(t *testing.T) {
 		},
 		TrustStores:       []string{"ca:valid-trust-store", "tsa:test-timestamp"},
 		TrustedIdentities: []string{"*"},
-	}
-	revocationTimestampingValidator, err := revocation.NewWithOptions(revocation.Options{
-		OCSPHTTPClient:   &http.Client{Timeout: 2 * time.Second},
-		CertChainPurpose: purpose.Timestamping,
-	})
-	if err != nil {
-		t.Fatalf("failed to get revocation timestamp client: %v", err)
 	}
 	// valid JWS signature envelope with timestamp countersignature
 	jwsEnvContent, err := parseEnvContent("testdata/timestamp/sigEnv/jwsWithTimestamp.sig", jws.MediaTypeEnvelope)
@@ -77,10 +82,9 @@ func TestAuthenticTimestamp(t *testing.T) {
 			t.Fatalf("expected non-nil tsaCertChain after successful timestamp verification")
 		}
 		// Exercise the timestamping cert chain revocation helper that was split
-		// out of verifyTimestamp (notation-go#422). The test fixture certs have
-		// no OCSP/CRL endpoints, so the validator should treat them as
-		// non-revokable and the helper should return nil.
-		if err := verifyTimestampingCertChainRevocation(context.Background(), tsaCertChain, revocationTimestampingValidator); err != nil {
+		// out of verifyTimestamp (notation-go#422). Use a stub validator so the
+		// test does not depend on external OCSP/CRL network reachability.
+		if err := verifyTimestampingCertChainRevocation(context.Background(), tsaCertChain, okRevocationValidator{}); err != nil {
 			t.Fatalf("expected nil error from verifyTimestampingCertChainRevocation, but got %s", err)
 		}
 	})
